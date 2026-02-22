@@ -2,6 +2,8 @@
 #include "./vendored/SDL_ttf/SDL_ttf.h"
 #include <cstdio>
 #include <map>
+#include <format>
+#include "raycast.cuh"
 
 #define DEFAULT_PTSIZE  18
 
@@ -77,75 +79,12 @@ RayCastingContext* initialize(const int width, const int height) {
     return context;
 }
 
-
-__global__ void rayCastGpu(
-    float* lines,
-    const float posX, const float posY,
-    const float dirX, const float dirY,
-    const float planeX, const float planeY,
-    const int w, int* map,
-    const int mapWidth, const int mapHeight,
-    float height)
-{
-    __shared__ int result;
-    if (threadIdx.x == 0) result = 2147483647;
-    __syncthreads();
-
-    int x = blockIdx.x;
-    int i = threadIdx.x;
-
-    if (i == 0) return; // thread 0 unused (steps are 1-indexed)
-
-    float cameraX = 2.0 * (float)x / (float)w - 1.0;
-    float rayDirX = dirX + planeX * cameraX;
-    float rayDirY = dirY + planeY * cameraX;
-
-    float dX = (rayDirX == 0.0f) ? 1e30 : (float)abs(1.0 / rayDirX);
-    float dY = (rayDirY == 0.0f) ? 1e30 : (float)abs(1.0 / rayDirY);
-
-    int stepX = rayDirX < 0.0f ? -1 : 1;
-    int stepY = rayDirY < 0.0f ? -1 : 1;
-
-    int mX0 = (int)posX, mY0 = (int)posY;
-    float sdX0 = rayDirX < 0.0f ? (posX - (float)mX0)*dX : ((float)mX0 + 1.0f - posX)*dX;
-    float sdY0 = rayDirY < 0.0f ? (posY - (float)mY0)*dY : ((float)mY0 + 1.0f - posY)*dY;
-
-    // Closed-form O(1) computation of map cell at step i
-    int xSteps, ySteps;
-    if (rayDirY == 0.0) {
-        xSteps = i; ySteps = 0;
-    } else if (rayDirX == 0.0) {
-        xSteps = 0; ySteps = i;
-    } else {
-        float num = (sdY0 - sdX0) + (float)(i - 1) * dY;
-        float exact = num / (dX + dY);
-        float fl = floor(exact);
-        xSteps = (exact - fl < 1e-9) ? (int)fl : (int)fl + 1;
-        xSteps = max(0, min(i, xSteps));
-        ySteps = i - xSteps;
-    }
-
-    int mapX = mX0 + xSteps * stepX;
-    int mapY = mY0 + ySteps * stepY;
-    float sdX = sdX0 + (float)xSteps * dX;
-    float sdY = sdY0 + (float)ySteps * dY;
-
-    int hit = 2147483647;
-    if (mapX < 0 || mapX >= mapWidth || mapY < 0 || mapY >= mapHeight) {
-        hit = i;
-    } else if (map[mapX * mapHeight + mapY] > 0) {
-        hit = i;
-    }
-
-    atomicMin(&result, hit);
-    __syncthreads();
-
-    if (result-1 == i) {
-        float wallDist = (sdX < sdY) ? sdX : sdY;
-        if (wallDist <= 0.0f) wallDist = 0.001f;
-        lines[x] = height / wallDist;
-    }
+double get_time() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
+
 
 float castRayCpu(const float posX, const float posY,
     const float dirX, const float dirY,
@@ -159,8 +98,8 @@ float castRayCpu(const float posX, const float posY,
     int mapX = static_cast<int>(posX);
     int mapY = static_cast<int>(posY);
 
-    float deltaDistX = (rayDirX == 0) ? 1e20 : std::abs(1 / rayDirX);
-    float deltaDistY = (rayDirY == 0) ? 1e20 : std::abs(1 / rayDirY);
+    float deltaDistX = (rayDirX == 0) ? 1e20 : fabs(1 / rayDirX);
+    float deltaDistY = (rayDirY == 0) ? 1e20 : fabs(1 / rayDirY);
 
     float sideDistX;
     float sideDistY;
@@ -234,7 +173,7 @@ float castRayCpu(const float posX, const float posY,
     return height / (sideDistY - deltaDistY);
 }
 
-void draw(RayCastingContext* context, const float* lines, size_t lines_len, const float* cpu_lines) {
+void draw(RayCastingContext* context, const float* lines, size_t lines_len, const float* cpu_lines, double cuda_time, double cpu_time) {
     context->clear();
     float top_height = static_cast<float>(context->height())/4.0f;
     float bottom_height = 3.0f * static_cast<float>(context->height())/4.0f;
@@ -244,13 +183,14 @@ void draw(RayCastingContext* context, const float* lines, size_t lines_len, cons
         context->DrawLine(i, static_cast<int>(top_height - half_line), i, static_cast<int>(half_line + top_height));
         context->DrawLine(i, static_cast<int>(bottom_height - cpu_half_line), i, static_cast<int>(bottom_height + cpu_half_line));
     }
-    context->DrawText("Hi mom!", 10, 10);
+    context->DrawText(std::format("GPU time: {}", cuda_time).c_str(), 10, 10);
+    context->DrawText(std::format("CPU time: {}", cpu_time).c_str(), 10, 30);
     context->show();
 }
 
 int main()
 {
-    const auto context = initialize(800, 600);
+    const auto context = initialize(1920, 600);
     int worldWidth = 24, worldHeight = 24;
     float posX = 22, posY = 12;  //x and y start position
     float dirX = -1, dirY = 0; //initial direction vector
@@ -366,13 +306,18 @@ int main()
         int height = context->height();
 
         int max_ray_length = (int)(sqrt(worldWidth*worldWidth + worldHeight*worldHeight)) + 1;
+        double cuda_start = get_time();
         rayCastGpu<<<width, max_ray_length + 1>>>(lines_gpu, posX, posY, dirX, dirY, planeX, planeY, width, mapGpu, worldWidth, worldHeight, height/2.0f);
         cudaDeviceSynchronize();
         cudaMemcpy(lines, lines_gpu, width*sizeof(float), cudaMemcpyDeviceToHost);
+        double cuda_time = get_time() - cuda_start;
+        double cpu_start = get_time();
         for (int i = 0; i < width; i++) {
             cpu_lines[i] = castRayCpu(posX, posY, dirX, dirY, planeX, planeY, i, width, (int**)map, worldWidth, worldHeight, height/2.0f);
         }
-        draw(context, lines, width, cpu_lines);
+        double cpu_time = get_time() - cpu_start;
+
+        draw(context, lines, width, cpu_lines, cuda_time, cpu_time);
     }
 
     return 0;

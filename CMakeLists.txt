@@ -7,7 +7,9 @@ find_package(SDL2 REQUIRED)
 
 add_subdirectory(vendored/SDL_ttf EXCLUDE_FROM_ALL)
 
-add_executable(cuda_raycaster main.cu)
+add_executable(cuda_raycaster main.cu
+        raycast.cuh
+        raycast.cu)
 
 target_include_directories(cuda_raycaster PRIVATE ${SDL2_INCLUDE_DIRS})
 target_link_libraries(cuda_raycaster PRIVATE SDL2::SDL2 SDL2::SDL2main SDL2_ttf::SDL2_ttf)
