@@ -3,6 +3,9 @@
 #include <cstdio>
 #include <map>
 #include <format>
+#include <thread>
+#include <chrono>
+
 #include "raycast.cuh"
 
 #define DEFAULT_PTSIZE  18
@@ -183,8 +186,7 @@ void draw(RayCastingContext* context, const float* lines, size_t lines_len, cons
         context->DrawLine(i, static_cast<int>(top_height - half_line), i, static_cast<int>(half_line + top_height));
         context->DrawLine(i, static_cast<int>(bottom_height - cpu_half_line), i, static_cast<int>(bottom_height + cpu_half_line));
     }
-    context->DrawText(std::format("GPU time: {}", cuda_time).c_str(), 10, 10);
-    context->DrawText(std::format("CPU time: {}", cpu_time).c_str(), 10, 30);
+    printf("CPU time: %f GPU Time: %f\n", cpu_time, cuda_time);
     context->show();
 }
 
@@ -306,8 +308,9 @@ int main()
         int height = context->height();
 
         int max_ray_length = (int)(sqrt(worldWidth*worldWidth + worldHeight*worldHeight)) + 1;
+        int threads = 32*(max_ray_length/32);
         double cuda_start = get_time();
-        rayCastGpu<<<width, max_ray_length + 1>>>(lines_gpu, posX, posY, dirX, dirY, planeX, planeY, width, mapGpu, worldWidth, worldHeight, height/2.0f);
+        rayCastGpu<<<width, threads>>>(lines_gpu, posX, posY, dirX, dirY, planeX, planeY, width, mapGpu, worldWidth, worldHeight, height/2.0f);
         cudaDeviceSynchronize();
         cudaMemcpy(lines, lines_gpu, width*sizeof(float), cudaMemcpyDeviceToHost);
         double cuda_time = get_time() - cuda_start;
@@ -318,6 +321,7 @@ int main()
         double cpu_time = get_time() - cpu_start;
 
         draw(context, lines, width, cpu_lines, cuda_time, cpu_time);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     return 0;

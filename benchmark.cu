@@ -57,9 +57,10 @@ int main()
     nvtxRangePop();
     nvtxRangePop();
     int max_ray_length = (int)(sqrt(worldWidth*worldWidth + worldHeight*worldHeight)) + 1;
-    printf("%d %d\n", width, max_ray_length);
+    int threads = 32*(max_ray_length/32);
+    printf("%d %d %d\n", width, max_ray_length, threads);
     nvtxRangePush("Raycasting");
-    rayCastGpu<<<width, max_ray_length + 1>>>(lines_gpu, posX, posY, dirX, dirY, planeX, planeY, width, mapGpu, worldWidth, worldHeight, height/2.0f);
+    rayCastGpu<<<width, threads>>>(lines_gpu, posX, posY, dirX, dirY, planeX, planeY, width, mapGpu, worldWidth, worldHeight, height/2.0f);
     cudaDeviceSynchronize();
     nvtxRangePop();
     nvtxRangePush("Fetching results");
